@@ -1,0 +1,147 @@
+const { Router } = require('express');
+const db = require('../db/mongo');
+const { issueNonce } = require('../utils/nonce');
+const verifyEd25519 = require('../middleware/verifyEd25519');
+
+const router = Router();
+
+// ── Challenge ─────────────────────────────────────────────────────────────────
+
+/**
+ * GET /auth/challenge?publicKey=<base64>
+ * Issues a one-time 32-byte hex nonce for the given public key.
+ * The client must sign this nonce and include it in the subsequent write request.
+ * The nonce expires after 60 seconds.
+ */
+router.get('/auth/challenge', (req, res) => {
+  const { publicKey } = req.query;
+  if (!publicKey) {
+    return res.status(400).json({ error: 'publicKey query parameter is required' });
+  }
+  const nonce = issueNonce(publicKey);
+  res.json({ nonce });
+});
+
+// ── Mods ──────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /mods/register
+ * Body: { peerId, publicKey, nonce, signature }
+ * Registers (or refreshes) a mod entry. Sets lastSeen = now.
+ */
+router.post('/mods/register', verifyEd25519, async (req, res) => {
+  const { peerId } = req.body;
+  const publicKey = req.verifiedPublicKey;
+
+  if (!peerId) {
+    return res.status(400).json({ error: 'peerId is required' });
+  }
+
+  try {
+    await db.upsertMod(peerId, publicKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /mods/register error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /mods/refresh
+ * Body: { publicKey, nonce, signature }
+ * Updates lastSeen for an existing mod entry to keep it alive.
+ */
+router.post('/mods/refresh', verifyEd25519, async (req, res) => {
+  const publicKey = req.verifiedPublicKey;
+  try {
+    const result = await db.touchMod(publicKey);
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Mod entry not found — register first' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /mods/refresh error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /mods/deregister
+ * Body: { publicKey, nonce, signature }
+ * Removes the mod entry immediately (best-effort; entries expire anyway on TTL).
+ */
+router.post('/mods/deregister', verifyEd25519, async (req, res) => {
+  const publicKey = req.verifiedPublicKey;
+  try {
+    await db.removeMod(publicKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /mods/deregister error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Relays ────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /relays/register
+ * Body: { address, publicKey, nonce, signature }
+ * Registers (or refreshes) a relay entry. Sets lastSeen = now.
+ * Open self-registration — any node with a valid keypair may register.
+ */
+router.post('/relays/register', verifyEd25519, async (req, res) => {
+  const { address } = req.body;
+  const publicKey = req.verifiedPublicKey;
+
+  if (!address) {
+    return res.status(400).json({ error: 'address is required' });
+  }
+  if (!address.startsWith('/')) {
+    return res.status(400).json({ error: 'address must be a valid libp2p multiaddr (starts with /)' });
+  }
+
+  try {
+    await db.upsertRelay(address.trim(), publicKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /relays/register error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /relays/refresh
+ * Body: { publicKey, nonce, signature }
+ * Updates lastSeen for an existing relay entry.
+ */
+router.post('/relays/refresh', verifyEd25519, async (req, res) => {
+  const publicKey = req.verifiedPublicKey;
+  try {
+    const result = await db.touchRelay(publicKey);
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Relay entry not found — register first' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /relays/refresh error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /relays/deregister
+ * Body: { publicKey, nonce, signature }
+ * Removes the relay entry immediately (best-effort; entries expire on TTL anyway).
+ */
+router.post('/relays/deregister', verifyEd25519, async (req, res) => {
+  const publicKey = req.verifiedPublicKey;
+  try {
+    await db.removeRelay(publicKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /relays/deregister error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+module.exports = router;
