@@ -115,6 +115,38 @@ func loadOrGenerateKey() (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
+// loadOrGenerateLibp2pKey returns a stable libp2p identity key.
+// It reads the LIBP2P_PRIV_KEY env var (base64-encoded protobuf marshalled key).
+// If the env var is absent it generates a fresh key, prints its base64 value,
+// and continues — set that printed value as LIBP2P_PRIV_KEY in Render's
+// environment-variable dashboard so the peer ID is stable on restarts.
+func loadOrGenerateLibp2pKey() (libp2pcrypto.PrivKey, error) {
+	if b64 := os.Getenv("LIBP2P_PRIV_KEY"); b64 != "" {
+		data, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("loadOrGenerateLibp2pKey: base64 decode: %w", err)
+		}
+		key, err := libp2pcrypto.UnmarshalPrivateKey(data)
+		if err != nil {
+			return nil, fmt.Errorf("loadOrGenerateLibp2pKey: unmarshal: %w", err)
+		}
+		log.Println("[INFO] Loaded libp2p identity from LIBP2P_PRIV_KEY env var")
+		return key, nil
+	}
+	// No env var — generate a fresh key for this run.
+	priv, _, err := libp2pcrypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("loadOrGenerateLibp2pKey: generate: %w", err)
+	}
+	marshalled, err := libp2pcrypto.MarshalPrivateKey(priv)
+	if err == nil {
+		log.Printf("[WARN] LIBP2P_PRIV_KEY not set. Peer ID will change on next restart.\n"+
+			"      Set this env var to make it stable:\n      LIBP2P_PRIV_KEY=%s",
+			base64.StdEncoding.EncodeToString(marshalled))
+	}
+	return priv, nil
+}
+
 // getChallenge fetches a one-time nonce from librserver.
 func getChallenge(pubKeyB64 string) (string, error) {
 	endpoint := fmt.Sprintf("%s/auth/challenge?publicKey=%s", serverURL, url.QueryEscape(pubKeyB64))
@@ -254,9 +286,9 @@ func main() {
 	pubKeyB64 := base64.StdEncoding.EncodeToString(relayPrivKey.Public().(ed25519.PublicKey))
 	log.Printf("[INFO] Relay public key: %s", pubKeyB64)
 
-	libp2pPrivKey, _, err := libp2pcrypto.GenerateEd25519Key(rand.Reader)
+	libp2pPrivKey, err := loadOrGenerateLibp2pKey()
 	if err != nil {
-		panic(err)
+		log.Fatalf("[ERROR] Failed to load/generate libp2p key: %v", err)
 	}
 	fmt.Println("[DEBUG] Creating relay host...")
 
