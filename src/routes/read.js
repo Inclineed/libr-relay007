@@ -58,12 +58,12 @@ router.get('/relays', async (_req, res) => {
 
 /**
  * GET /nodes
- * Returns all bootstrap DB node entries (static, no TTL).
- * Response: [{ node_id, peer_id }]
+ * Returns all DB node entries whose lastSeen is within the configured TTL.
+ * Response: [{ nodeId, peerId, publicKey, lastSeen }]
  */
 router.get('/nodes', async (_req, res) => {
   try {
-    const nodes = await db.getNodes();
+    const nodes = await db.getNodes(config.entryTtlMs);
     res.json(nodes);
   } catch (err) {
     logger.error({ err }, 'GET /nodes error');

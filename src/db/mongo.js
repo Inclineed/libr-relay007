@@ -79,10 +79,33 @@ function removeStaleRelaysBefore(cutoff) {
   return db.collection('relays').deleteMany({ lastSeen: { $lt: cutoff } });
 }
 
-// ── Nodes (bootstrap DB nodes — static, no TTL) ───────────────────────────────
+// ── Nodes (bootstrap DB nodes — dynamic, TTL-based, same as relays) ─────────
+// Collection: 'nodes' — { nodeId, peerId, publicKey, lastSeen }
+// DB nodes self-register on startup and refresh periodically.
 
-function getNodes() {
-  return db.collection('nodes').find({}, { projection: { _id: 0 } }).toArray();
+function getNodes(sinceMs) {
+  const filter = sinceMs ? { lastSeen: { $gte: new Date(Date.now() - sinceMs) } } : {};
+  return db.collection('nodes').find(filter, { projection: { _id: 0 } }).toArray();
+}
+
+function upsertNode(nodeId, peerId, publicKey) {
+  return db.collection('nodes').updateOne(
+    { publicKey },
+    { $set: { node_id: nodeId, peer_id: peerId, publicKey, lastSeen: new Date() } },
+    { upsert: true },
+  );
+}
+
+function touchNode(publicKey) {
+  return db.collection('nodes').updateOne({ publicKey }, { $set: { lastSeen: new Date() } });
+}
+
+function removeNode(publicKey) {
+  return db.collection('nodes').deleteOne({ publicKey });
+}
+
+function removeStaleNodesBefore(cutoff) {
+  return db.collection('nodes').deleteMany({ lastSeen: { $lt: cutoff } });
 }
 
 module.exports = {
@@ -99,4 +122,8 @@ module.exports = {
   removeRelay,
   removeStaleRelaysBefore,
   getNodes,
+  upsertNode,
+  touchNode,
+  removeNode,
+  removeStaleNodesBefore,
 };

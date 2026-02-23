@@ -167,4 +167,67 @@ router.post('/relays/deregister', verifyEd25519, async (req, res) => {
   }
 });
 
+// ── Nodes ─────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /nodes/register
+ * Body: { nodeId, peerId, publicKey, nonce, signature }
+ * Open self-registration — any DB node with a valid keypair may register.
+ * Sets lastSeen = now.
+ */
+router.post('/nodes/register', verifyEd25519, async (req, res) => {
+  const { nodeId, peerId } = req.body;
+  const publicKey = req.verifiedPublicKey;
+
+  if (!nodeId || !peerId) {
+    return res.status(400).json({ error: 'nodeId and peerId are required' });
+  }
+
+  try {
+    await db.upsertNode(nodeId, peerId, publicKey);
+    logger.info({ publicKey, peerId, nodeId }, 'Node registered');
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'POST /nodes/register error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /nodes/refresh
+ * Body: { publicKey, nonce, signature }
+ * Updates lastSeen for an existing node entry.
+ */
+router.post('/nodes/refresh', verifyEd25519, async (req, res) => {
+  const publicKey = req.verifiedPublicKey;
+  try {
+    const result = await db.touchNode(publicKey);
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Node entry not found — register first' });
+    }
+    logger.debug({ publicKey }, 'Node presence refreshed');
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'POST /nodes/refresh error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /nodes/deregister
+ * Body: { publicKey, nonce, signature }
+ * Removes the node entry immediately (best-effort; expires naturally on TTL anyway).
+ */
+router.post('/nodes/deregister', verifyEd25519, async (req, res) => {
+  const publicKey = req.verifiedPublicKey;
+  try {
+    await db.removeNode(publicKey);
+    logger.info({ publicKey }, 'Node deregistered');
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'POST /nodes/deregister error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

@@ -16,10 +16,11 @@ function startExpiryJob() {
     try {
       const modResult = await db.removeStaleModsBefore(cutoff);
       const relayResult = await db.removeStaleRelaysBefore(cutoff);
-      const removed = modResult.deletedCount + relayResult.deletedCount;
+      const nodeResult = await db.removeStaleNodesBefore(cutoff);
+      const removed = modResult.deletedCount + relayResult.deletedCount + nodeResult.deletedCount;
       if (removed > 0) {
         logger.info(
-          { staleMods: modResult.deletedCount, staleRelays: relayResult.deletedCount, cutoff },
+          { staleMods: modResult.deletedCount, staleRelays: relayResult.deletedCount, staleNodes: nodeResult.deletedCount, cutoff },
           'Expiry job removed stale entries',
         );
       }
