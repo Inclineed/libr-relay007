@@ -125,8 +125,8 @@ router.post('/relays/register', verifyEd25519, async (req, res) => {
     logger.info({ publicKey, address }, 'Relay registered');
     res.json({ ok: true });
   } catch (err) {
-    logger.error({ err }, 'POST /relays/register error');
-    res.status(500).json({ error: 'Internal server error' });
+    logger.error({ err, address, publicKey }, 'POST /relays/register error');
+    res.status(500).json({ error: 'Internal server error', detail: err.message });
   }
 });
 
@@ -188,8 +188,8 @@ router.post('/nodes/register', verifyEd25519, async (req, res) => {
     logger.info({ publicKey, peerId, nodeId }, 'Node registered');
     res.json({ ok: true });
   } catch (err) {
-    logger.error({ err }, 'POST /nodes/register error');
-    res.status(500).json({ error: 'Internal server error' });
+    logger.error({ err, peerId, nodeId }, 'POST /nodes/register error');
+    res.status(500).json({ error: 'Internal server error', detail: err.message });
   }
 });
 

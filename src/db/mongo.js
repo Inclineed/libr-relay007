@@ -61,7 +61,7 @@ function getRelays(sinceMs) {
 
 function upsertRelay(address, publicKey) {
   return db.collection('relays').updateOne(
-    { publicKey },
+    { address },
     { $set: { address, publicKey, lastSeen: new Date() } },
     { upsert: true },
   );
@@ -90,7 +90,7 @@ function getNodes(sinceMs) {
 
 function upsertNode(nodeId, peerId, publicKey) {
   return db.collection('nodes').updateOne(
-    { publicKey },
+    { peer_id: peerId },
     { $set: { node_id: nodeId, peer_id: peerId, publicKey, lastSeen: new Date() } },
     { upsert: true },
   );
