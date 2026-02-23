@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const db = require('../db/mongo');
 const config = require('../config');
+const logger = require('../logger');
 
 const router = Router();
 
@@ -14,7 +15,28 @@ router.get('/mods', async (_req, res) => {
     const mods = await db.getMods(config.entryTtlMs);
     res.json(mods);
   } catch (err) {
-    console.error('GET /mods error:', err);
+    logger.error({ err }, 'GET /mods error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /mods/check?publicKey=<base64>
+ * Checks whether a public key is in the mod allowlist (mods collection).
+ * Used by mod_client at startup to decide if it is a moderator.
+ * No authentication required — the allowlist is not sensitive.
+ * Response: { allowed: true|false }
+ */
+router.get('/mods/check', async (req, res) => {
+  const { publicKey } = req.query;
+  if (!publicKey) {
+    return res.status(400).json({ error: 'publicKey query parameter is required' });
+  }
+  try {
+    const allowed = await db.isModAllowed(publicKey);
+    res.json({ allowed });
+  } catch (err) {
+    logger.error({ err }, 'GET /mods/check error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -29,7 +51,7 @@ router.get('/relays', async (_req, res) => {
     const relays = await db.getRelays(config.entryTtlMs);
     res.json(relays);
   } catch (err) {
-    console.error('GET /relays error:', err);
+    logger.error({ err }, 'GET /relays error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -44,7 +66,7 @@ router.get('/nodes', async (_req, res) => {
     const nodes = await db.getNodes();
     res.json(nodes);
   } catch (err) {
-    console.error('GET /nodes error:', err);
+    logger.error({ err }, 'GET /nodes error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });

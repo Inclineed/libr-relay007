@@ -1,5 +1,6 @@
 const db = require('../db/mongo');
 const config = require('../config');
+const logger = require('../logger');
 
 /**
  * Periodically removes mod and relay entries that have not been refreshed
@@ -17,22 +18,22 @@ function startExpiryJob() {
       const relayResult = await db.removeStaleRelaysBefore(cutoff);
       const removed = modResult.deletedCount + relayResult.deletedCount;
       if (removed > 0) {
-        console.log(
-          `🧹 Expiry job: removed ${modResult.deletedCount} stale mod(s), ` +
-          `${relayResult.deletedCount} stale relay(s) (cutoff: ${cutoff.toISOString()})`,
+        logger.info(
+          { staleMods: modResult.deletedCount, staleRelays: relayResult.deletedCount, cutoff },
+          'Expiry job removed stale entries',
         );
       }
     } catch (err) {
-      console.error('Expiry job error:', err);
+      logger.error({ err }, 'Expiry job error');
     }
   }, config.expiryJobIntervalMs);
 
   // Don't block process exit
   if (interval.unref) interval.unref();
 
-  console.log(
-    `⏱  Expiry job started — TTL ${config.entryTtlMs / 1000}s, ` +
-    `sweep every ${config.expiryJobIntervalMs / 1000}s`,
+  logger.info(
+    { ttlSeconds: config.entryTtlMs / 1000, sweepIntervalSeconds: config.expiryJobIntervalMs / 1000 },
+    'Expiry job started',
   );
 }
 

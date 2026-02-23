@@ -2,6 +2,7 @@ const { Router } = require('express');
 const db = require('../db/mongo');
 const { issueNonce } = require('../utils/nonce');
 const verifyEd25519 = require('../middleware/verifyEd25519');
+const logger = require('../logger');
 
 const router = Router();
 
@@ -19,6 +20,7 @@ router.get('/auth/challenge', (req, res) => {
     return res.status(400).json({ error: 'publicKey query parameter is required' });
   }
   const nonce = issueNonce(publicKey);
+  logger.debug({ publicKey }, 'Challenge issued');
   res.json({ nonce });
 });
 
@@ -38,10 +40,16 @@ router.post('/mods/register', verifyEd25519, async (req, res) => {
   }
 
   try {
+    const allowed = await db.isModAllowed(publicKey);
+    if (!allowed) {
+      logger.warn({ publicKey }, 'Mod registration denied — not in allowlist');
+      return res.status(403).json({ error: 'Public key is not in the moderator allowlist' });
+    }
     await db.upsertMod(peerId, publicKey);
+    logger.info({ publicKey, peerId }, 'Mod registered');
     res.json({ ok: true });
   } catch (err) {
-    console.error('POST /mods/register error:', err);
+    logger.error({ err }, 'POST /mods/register error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -54,13 +62,19 @@ router.post('/mods/register', verifyEd25519, async (req, res) => {
 router.post('/mods/refresh', verifyEd25519, async (req, res) => {
   const publicKey = req.verifiedPublicKey;
   try {
+    const allowed = await db.isModAllowed(publicKey);
+    if (!allowed) {
+      logger.warn({ publicKey }, 'Mod refresh denied — not in allowlist');
+      return res.status(403).json({ error: 'Public key is not in the moderator allowlist' });
+    }
     const result = await db.touchMod(publicKey);
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Mod entry not found — register first' });
     }
+    logger.debug({ publicKey }, 'Mod presence refreshed');
     res.json({ ok: true });
   } catch (err) {
-    console.error('POST /mods/refresh error:', err);
+    logger.error({ err }, 'POST /mods/refresh error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -73,10 +87,16 @@ router.post('/mods/refresh', verifyEd25519, async (req, res) => {
 router.post('/mods/deregister', verifyEd25519, async (req, res) => {
   const publicKey = req.verifiedPublicKey;
   try {
+    const allowed = await db.isModAllowed(publicKey);
+    if (!allowed) {
+      logger.warn({ publicKey }, 'Mod deregister denied — not in allowlist');
+      return res.status(403).json({ error: 'Public key is not in the moderator allowlist' });
+    }
     await db.removeMod(publicKey);
+    logger.info({ publicKey }, 'Mod deregistered');
     res.json({ ok: true });
   } catch (err) {
-    console.error('POST /mods/deregister error:', err);
+    logger.error({ err }, 'POST /mods/deregister error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -102,9 +122,10 @@ router.post('/relays/register', verifyEd25519, async (req, res) => {
 
   try {
     await db.upsertRelay(address.trim(), publicKey);
+    logger.info({ publicKey, address }, 'Relay registered');
     res.json({ ok: true });
   } catch (err) {
-    console.error('POST /relays/register error:', err);
+    logger.error({ err }, 'POST /relays/register error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -121,9 +142,10 @@ router.post('/relays/refresh', verifyEd25519, async (req, res) => {
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Relay entry not found — register first' });
     }
+    logger.debug({ publicKey }, 'Relay presence refreshed');
     res.json({ ok: true });
   } catch (err) {
-    console.error('POST /relays/refresh error:', err);
+    logger.error({ err }, 'POST /relays/refresh error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -137,9 +159,10 @@ router.post('/relays/deregister', verifyEd25519, async (req, res) => {
   const publicKey = req.verifiedPublicKey;
   try {
     await db.removeRelay(publicKey);
+    logger.info({ publicKey }, 'Relay deregistered');
     res.json({ ok: true });
   } catch (err) {
-    console.error('POST /relays/deregister error:', err);
+    logger.error({ err }, 'POST /relays/deregister error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });

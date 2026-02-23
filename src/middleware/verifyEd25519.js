@@ -1,5 +1,6 @@
 const { consumeNonce } = require('../utils/nonce');
 const { verifyEd25519 } = require('../utils/crypto');
+const logger = require('../logger');
 
 /**
  * Express middleware that enforces Ed25519 challenge-response authentication.
@@ -22,16 +23,19 @@ function verifyEd25519Middleware(req, res, next) {
   // Retrieve and consume the stored nonce (one-time use)
   const storedNonce = consumeNonce(publicKey);
   if (!storedNonce) {
+    logger.warn({ publicKey }, 'Auth failed: no valid challenge found');
     return res.status(401).json({ error: 'No valid challenge found — request a new challenge first' });
   }
 
   // The client must present the exact nonce we issued
   if (storedNonce !== nonce) {
+    logger.warn({ publicKey }, 'Auth failed: nonce mismatch');
     return res.status(401).json({ error: 'Nonce mismatch' });
   }
 
   // Verify the Ed25519 signature over the nonce bytes
   if (!verifyEd25519(publicKey, nonce, signature)) {
+    logger.warn({ publicKey }, 'Auth failed: invalid Ed25519 signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
 

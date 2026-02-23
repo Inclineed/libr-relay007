@@ -1,4 +1,6 @@
 const express = require('express');
+const pinoHttp = require('pino-http');
+const logger = require('./logger');
 const config = require('./config');
 const { connect } = require('./db/mongo');
 const readRoutes = require('./routes/read');
@@ -6,7 +8,14 @@ const writeRoutes = require('./routes/write');
 const { startExpiryJob } = require('./jobs/expiry');
 
 const app = express();
+
+// Structured HTTP request logging (every request gets a log line with method,
+// url, statusCode, responseTime)
+app.use(pinoHttp({ logger }));
 app.use(express.json());
+
+// ── Health check (used by Render) ─────────────────────────────────────────────
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 // Public read-only endpoints — no authentication required
@@ -19,12 +28,12 @@ app.use('/', writeRoutes);
 async function main() {
   await connect();
   startExpiryJob();
-  app.listen(config.port, () => {
-    console.log(`🚀 librserver running on port ${config.port}`);
+  app.listen(config.port, '0.0.0.0', () => {
+    logger.info({ port: config.port }, 'librserver started');
   });
 }
 
 main().catch((err) => {
-  console.error('Failed to start server:', err);
+  logger.fatal({ err }, 'Failed to start server');
   process.exit(1);
 });

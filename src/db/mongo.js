@@ -1,5 +1,6 @@
 const { MongoClient } = require('mongodb');
 const config = require('../config');
+const logger = require('../logger');
 
 let db;
 
@@ -7,18 +8,32 @@ async function connect() {
   const client = new MongoClient(config.mongoUri);
   await client.connect();
   db = client.db('Addrs');
-  console.log('✅ MongoDB connected');
+  logger.info('MongoDB connected');
 }
 
-// ── Mods ─────────────────────────────────────────────────────────────────────
+// ── Mods allowlist (admin-managed, static) ────────────────────────────────────
+// Collection: 'mods'  — contains { publicKey } for every permitted moderator.
+// Only admins write to this collection directly in MongoDB.
+
+/**
+ * Returns true if the given publicKey exists in the mods allowlist.
+ */
+async function isModAllowed(publicKey) {
+  const doc = await db.collection('mods').findOne({ publicKey }, { projection: { _id: 1 } });
+  return doc !== null;
+}
+
+// ── Online mods live registry (server-managed, TTL-based) ─────────────────────
+// Collection: 'onlinemods' — contains { peerId, publicKey, lastSeen } for mods
+// that are currently online. Written by the server on register/refresh/deregister.
 
 function getMods(sinceMs) {
   const filter = sinceMs ? { lastSeen: { $gte: new Date(Date.now() - sinceMs) } } : {};
-  return db.collection('mods').find(filter, { projection: { _id: 0 } }).toArray();
+  return db.collection('onlinemods').find(filter, { projection: { _id: 0 } }).toArray();
 }
 
 function upsertMod(peerId, publicKey) {
-  return db.collection('mods').updateOne(
+  return db.collection('onlinemods').updateOne(
     { publicKey },
     { $set: { peerId, publicKey, lastSeen: new Date() } },
     { upsert: true },
@@ -26,15 +41,15 @@ function upsertMod(peerId, publicKey) {
 }
 
 function touchMod(publicKey) {
-  return db.collection('mods').updateOne({ publicKey }, { $set: { lastSeen: new Date() } });
+  return db.collection('onlinemods').updateOne({ publicKey }, { $set: { lastSeen: new Date() } });
 }
 
 function removeMod(publicKey) {
-  return db.collection('mods').deleteOne({ publicKey });
+  return db.collection('onlinemods').deleteOne({ publicKey });
 }
 
 function removeStaleModsBefore(cutoff) {
-  return db.collection('mods').deleteMany({ lastSeen: { $lt: cutoff } });
+  return db.collection('onlinemods').deleteMany({ lastSeen: { $lt: cutoff } });
 }
 
 // ── Relays ────────────────────────────────────────────────────────────────────
@@ -72,6 +87,7 @@ function getNodes() {
 
 module.exports = {
   connect,
+  isModAllowed,
   getMods,
   upsertMod,
   touchMod,
