@@ -169,12 +169,23 @@ func signedPost(endpoint string, pubKeyB64 string, priv ed25519.PrivateKey, extr
 }
 
 // registerRelayWithServer registers this relay's multiaddr with librserver.
-func registerRelayWithServer(multiaddr string, pubKeyB64 string, priv ed25519.PrivateKey) {
+func registerRelayWithServer(multiaddr string, pubKeyB64 string, priv ed25519.PrivateKey) error {
 	if err := signedPost("/relays/register", pubKeyB64, priv, map[string]string{"address": multiaddr}); err != nil {
 		log.Printf("[ERROR] Failed to register relay with server: %v", err)
-	} else {
-		log.Println("[INFO] Relay registered with librserver")
+		return err
 	}
+	log.Println("[INFO] Relay registered with librserver")
+	return nil
+}
+
+// refreshRelayWithServer refreshes this relay's lastSeen to prevent expiry.
+func refreshRelayWithServer(pubKeyB64 string, priv ed25519.PrivateKey) error {
+	if err := signedPost("/relays/refresh", pubKeyB64, priv, nil); err != nil {
+		log.Printf("[ERROR] Failed to refresh relay with server: %v", err)
+		return err
+	}
+	log.Println("[INFO] Relay presence refreshed with librserver")
+	return nil
 }
 
 // deregisterRelayFromServer removes this relay from librserver on shutdown.
@@ -299,8 +310,22 @@ func main() {
 		fmt.Printf("[INFO] Relay Address: %s/p2p/%s\n", addr, RelayHost.ID())
 	}
 
-	// Register with librserver so clients can discover this relay
-	go registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey)
+	// Register with librserver so clients can discover this relay,
+	// then keep presence alive by refreshing every 90 s (half the 180 s TTL).
+	go func() {
+		if err := registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey); err != nil {
+			log.Printf("[WARN] Initial registration failed, will retry on first refresh tick")
+		}
+		ticker := time.NewTicker(90 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// If refresh 404s (entry was swept), re-register instead.
+			if err := refreshRelayWithServer(pubKeyB64, relayPrivKey); err != nil {
+				log.Printf("[WARN] Refresh failed, attempting re-register...")
+				_ = registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey)
+			}
+		}
+	}()
 
 	RelayHost.SetStreamHandler("/chat/1.0.0", handleChatStream)
 	go func() {
