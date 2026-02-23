@@ -3,31 +3,30 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"io"
-	"math/big"
-	"sort"
-	"strings"
-
-	//Peers "chatprotocol/peer"
-
-	"context"
-	"encoding/csv"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"math/big"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"net/http"
+	"context"
 
 	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/crypto"
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -50,9 +49,11 @@ const ChatProtocol = protocol.ID("/chat/1.0.0")
 
 //var RelayMultiAddrList = []string{"/dns4/0.tcp.in.ngrok.io/tcp/14395/p2p/12D3KooWLBVV1ty7MwJQos34jy1WqGrfkb3bMAfxUJzCgwTBQ2pn",}
 
+// reqFormat mirrors the struct used in mod_client/peers/peer.go.
+// PeerID is the libp2p peer ID string of the target peer.
 type reqFormat struct {
 	Type      string          `json:"type,omitempty"`
-	PubIP     string          `json:"pubip,omitempty"`
+	PeerID    string          `json:"peer_id,omitempty"`
 	ReqParams json.RawMessage `json:"reqparams,omitempty"`
 	Body      json.RawMessage `json:"body,omitempty"`
 }
@@ -80,16 +81,135 @@ func (re *RelayEvents) Disconnected(net network.Network, conn network.Conn) {
 	fmt.Printf("[INFO] Peer disconnected: %s\n", conn.RemotePeer())
 	// Remove peer from IDmap if needed
 	mu.Lock()
-	for pubip, pid := range IDmap {
+	for pid := range IDmap {
 		if pid == conn.RemotePeer().String() {
-			delete(IDmap, pubip)
+			delete(IDmap, pid)
 			break
 		}
 	}
 	mu.Unlock()
 }
 
-const sheetWebAppURL = "https://script.google.com/macros/s/AKfycbzQSQ1rKykcp-HVC0qEO4-C8GhEtKVZ3S5u2iR91-nZR9jOOWkvhb7K73QSmDmjSdmN/exec"
+// serverURL is read from the SERVER_URL environment variable.
+// Set it to the base URL of your deployed librserver, e.g.:
+//   https://libr-relay007-1.onrender.com
+var serverURL string
+
+const relayKeyFile = "relay_priv_key.bin"
+
+// loadOrGenerateKey loads a persisted Ed25519 private key from disk, or
+// generates and saves a new one. The key is used for challenge-response
+// authentication with librserver so the same publicKey survives restarts.
+func loadOrGenerateKey() (ed25519.PrivateKey, error) {
+	data, err := os.ReadFile(relayKeyFile)
+	if err == nil && len(data) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(data), nil
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generateKey: %w", err)
+	}
+	if err := os.WriteFile(relayKeyFile, priv, 0600); err != nil {
+		log.Printf("[WARN] Could not persist relay key: %v", err)
+	}
+	return priv, nil
+}
+
+// getChallenge fetches a one-time nonce from librserver.
+func getChallenge(pubKeyB64 string) (string, error) {
+	endpoint := fmt.Sprintf("%s/auth/challenge?publicKey=%s", serverURL, url.QueryEscape(pubKeyB64))
+	resp, err := http.Get(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("getChallenge: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("getChallenge: server returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("getChallenge: decode: %w", err)
+	}
+	return result.Nonce, nil
+}
+
+// signedPost performs challenge → sign → POST for librserver authenticated endpoints.
+func signedPost(endpoint string, pubKeyB64 string, priv ed25519.PrivateKey, extra map[string]string) error {
+	nonce, err := getChallenge(pubKeyB64)
+	if err != nil {
+		return err
+	}
+	sig := ed25519.Sign(priv, []byte(nonce))
+	sigB64 := base64.StdEncoding.EncodeToString(sig)
+	body := map[string]string{
+		"publicKey": pubKeyB64,
+		"nonce":     nonce,
+		"signature": sigB64,
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("signedPost: marshal: %w", err)
+	}
+	resp, err := http.Post(serverURL+endpoint, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("signedPost %s: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("signedPost %s: server returned %d: %s", endpoint, resp.StatusCode, b)
+	}
+	return nil
+}
+
+// registerRelayWithServer registers this relay's multiaddr with librserver.
+func registerRelayWithServer(multiaddr string, pubKeyB64 string, priv ed25519.PrivateKey) {
+	if err := signedPost("/relays/register", pubKeyB64, priv, map[string]string{"address": multiaddr}); err != nil {
+		log.Printf("[ERROR] Failed to register relay with server: %v", err)
+	} else {
+		log.Println("[INFO] Relay registered with librserver")
+	}
+}
+
+// deregisterRelayFromServer removes this relay from librserver on shutdown.
+func deregisterRelayFromServer(pubKeyB64 string, priv ed25519.PrivateKey) {
+	if err := signedPost("/relays/deregister", pubKeyB64, priv, nil); err != nil {
+		log.Printf("[WARN] Failed to deregister relay: %v", err)
+	} else {
+		log.Println("[INFO] Relay deregistered from librserver")
+	}
+}
+
+// fetchRelaysFromServer retrieves live relay multiaddrs from librserver.
+func fetchRelaysFromServer() ([]string, error) {
+	resp, err := http.Get(serverURL + "/relays")
+	if err != nil {
+		return nil, fmt.Errorf("fetchRelays: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetchRelays: server returned %d", resp.StatusCode)
+	}
+	var docs []struct {
+		Address string `json:"address"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&docs); err != nil {
+		return nil, fmt.Errorf("fetchRelays: decode: %w", err)
+	}
+	var addrs []string
+	for _, d := range docs {
+		if strings.HasPrefix(d.Address, "/") {
+			addrs = append(addrs, strings.TrimSpace(d.Address))
+		}
+	}
+	return addrs, nil
+}
 
 func main() {
 	// fmt.Println("123")
@@ -111,23 +231,33 @@ func main() {
 		log.Fatalf("[ERROR] Failed to create connection manager: %v", err)
 	}
 
-	privKey, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	// Load/generate persistent author key for server auth
+	serverURL = strings.TrimRight(os.Getenv("SERVER_URL"), "/")
+	if serverURL == "" {
+		log.Fatal("[ERROR] SERVER_URL environment variable is not set")
+	}
+	relayPrivKey, err := loadOrGenerateKey()
 	if err != nil {
-		// handle error
+		log.Fatalf("[ERROR] Failed to load relay key: %v", err)
+	}
+	pubKeyB64 := base64.StdEncoding.EncodeToString(relayPrivKey.Public().(ed25519.PublicKey))
+	log.Printf("[INFO] Relay public key: %s", pubKeyB64)
+
+	libp2pPrivKey, _, err := libp2pcrypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
 		panic(err)
 	}
 	fmt.Println("[DEBUG] Creating relay host...")
 
 	RelayHost, err = libp2p.New(
-		libp2p.Identity(privKey),
-
-		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/443/ws"), // Changed from /tcp/4567 ?
+		libp2p.Identity(libp2pPrivKey),
+		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/443/ws"),
 		libp2p.Security(libp2ptls.ID, libp2ptls.New),
 		libp2p.ConnectionManager(connMgr),
 		libp2p.EnableNATService(),
 		libp2p.EnableRelayService(),
 		libp2p.Transport(tcp.NewTCPTransport),
-		libp2p.Transport(websocket.New), // Add the websocket transport
+		libp2p.Transport(websocket.New),
 	)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to create relay host: %v", err)
@@ -136,8 +266,8 @@ func main() {
 	relayMultiaddrFull := fmt.Sprintf("/dns4/libr-relay.onrender.com/tcp/443/wss/p2p/%s", RelayHost.ID().String())
 
 	defer func() {
-		fmt.Println("[DEBUG] Closing relay host...")
-		deleteRelayAddrFromSheet(relayMultiaddrFull)
+		fmt.Println("[DEBUG] Shutting down relay...")
+		deregisterRelayFromServer(pubKeyB64, relayPrivKey)
 		RelayHost.Close()
 	}()
 	customRelayResources := relay.Resources{
@@ -169,48 +299,18 @@ func main() {
 		fmt.Printf("[INFO] Relay Address: %s/p2p/%s\n", addr, RelayHost.ID())
 	}
 
-	//relayMultiaddrFull :=  fmt.Sprintf("/dns4/0.tcp.in.ngrok.io/tcp/%s/p2p/%s","port_number", RelayHost.ID().String())
-
-	go uploadRelayAddrToSheet(relayMultiaddrFull)
+	// Register with librserver so clients can discover this relay
+	go registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey)
 
 	RelayHost.SetStreamHandler("/chat/1.0.0", handleChatStream)
 	go func() {
 		for {
-			fmt.Println(IDmap)
+			mu.RLock()
+			fmt.Println("[DEBUG] IDmap:", IDmap)
+			mu.RUnlock()
 			time.Sleep(30 * time.Second)
 		}
 	}()
-
-	// go func() {
-	// 	log.Println("ENTERING GO ROUTINE FOR HEALTH CHECK SERVER")
-
-	// 	check := func(w http.ResponseWriter, r *http.Request) {
-	// 		log.Println("[DEBUG] /check endpoint hit")
-	// 		if r.Method == http.MethodGet {
-	// 			w.WriteHeader(http.StatusOK)
-	// 			w.Write([]byte("running"))
-	// 		} else {
-	// 			w.WriteHeader(http.StatusMethodNotAllowed)
-	// 		}
-	// 	}
-
-	// 	http.HandleFunc("/check", check)
-
-	// 	port := os.Getenv("PORT")
-	// 	if port == "" {
-	// 		port = "8080"
-	// 	}
-
-	// 	addr := fmt.Sprintf(":%s", port)
-	// 	log.Printf("[INFO] Starting health check server on %s", addr)
-
-	// 	if err := http.ListenAndServe(addr, nil); err != nil {
-	// 		log.Fatalf("[ERROR] Failed to start health check server: %v", err)
-	// 	}
-	// }()
-
-	addr, _ := fetchRelayAddrsFromSheet()
-	go PingTargets(addr, 5*time.Minute)
 
 	fmt.Println("[DEBUG] Waiting for interrupt signal...")
 	c := make(chan os.Signal, 1)
@@ -218,45 +318,6 @@ func main() {
 	<-c
 
 	fmt.Println("[INFO] Shutting down relay...")
-}
-
-func PingTargets(addresses []string, interval time.Duration) {
-	go func() {
-		for {
-			for _, multiAddrStr := range addresses {
-				// Parse the multiaddress string
-				maddr, err := ma.NewMultiaddr(multiAddrStr)
-				if err != nil {
-					log.Printf("[WARN] Could not parse multiaddress %s: %v\n", multiAddrStr, err)
-					continue
-				}
-
-				// Extract the domain name
-				host, err := maddr.ValueForProtocol(ma.P_DNS4)
-				if err != nil {
-					// Fallback for P_DNS6 or other domain protocols if needed
-					host, err = maddr.ValueForProtocol(ma.P_DNS6)
-					if err != nil {
-						log.Printf("[WARN] Could not extract host from multiaddress %s: %v\n", multiAddrStr, err)
-						continue
-					}
-				}
-
-				// Construct the final HTTP URL for the health check
-				pingURL := fmt.Sprintf("https://%s/check", host)
-
-				// Ping the valid URL
-				resp, err := http.Get(pingURL)
-				if err != nil {
-					log.Printf("[WARN] Failed to ping %s: %v\n", pingURL, err)
-					continue
-				}
-				resp.Body.Close()
-				log.Printf("[INFO] Pinged %s — Status: %s\n", pingURL, resp.Status)
-			}
-			time.Sleep(interval)
-		}
-	}()
 }
 
 func handleChatStream(s network.Stream) {
@@ -285,25 +346,25 @@ func handleChatStream(s network.Stream) {
 
 		if req.Type == "register" {
 			peerID := s.Conn().RemotePeer()
-			fmt.Printf("[INFO]Given public IP is %s \n", req.PubIP)
-			fmt.Println("[INFO]Registering the peer into relay map")
+			fmt.Printf("[INFO] Registering peer: %s\n", req.PeerID)
+			fmt.Println("[INFO] Registering the peer into relay map")
 			mu.Lock()
-			IDmap[req.PubIP] = peerID.String()
+			IDmap[req.PeerID] = peerID.String()
 			mu.Unlock()
 		}
 
 		if req.Type == "SendMsg" {
 			mu.RLock()
-			targetPeerID := IDmap[req.PubIP]
+			targetPeerID := IDmap[req.PeerID]
 			mu.RUnlock()
 			if targetPeerID == "" {
 				fmt.Println("[DEBUG]This peer is not on this relay, contacting other relay")
-				targetRelayAddr := GetRelayAddr(req.PubIP)
+				targetRelayAddr := GetRelayAddr(req.PeerID)
 
 				var forwardReq reqFormat
 				forwardReq.Body = req.Body
 				forwardReq.ReqParams = req.ReqParams
-				forwardReq.PubIP = req.PubIP
+				forwardReq.PeerID = req.PeerID
 				forwardReq.Type = "forward"
 
 				relayMA, err := ma.NewMultiaddr(targetRelayAddr)
@@ -448,7 +509,7 @@ func handleChatStream(s network.Stream) {
 
 		if req.Type == "forward" {
 			mu.RLock()
-			targetPeerID := IDmap[req.PubIP]
+			targetPeerID := IDmap[req.PeerID]
 			mu.RUnlock()
 
 			if targetPeerID == "" {
@@ -528,33 +589,31 @@ func handleChatStream(s network.Stream) {
 	}
 }
 
-func GetRelayAddr(peerIP string) string {
-	RelayMultiAddrList, err := fetchRelayAddrsFromSheet()
-
+// GetRelayAddr uses XOR distance to pick the best relay for a given peer ID.
+func GetRelayAddr(peerID string) string {
+	RelayMultiAddrList, err := fetchRelaysFromServer()
 	if err != nil {
-		fmt.Println("[DEBUG]Error getting addr from the sheet")
+		fmt.Println("[DEBUG] Error getting relays from server:", err)
+		return ""
 	}
+
 	var relayList []string
-	for _, multiaddr := range RelayMultiAddrList {
-		parts := strings.Split(multiaddr, "/")
+	for _, maddr := range RelayMultiAddrList {
+		parts := strings.Split(maddr, "/")
 		relayList = append(relayList, parts[len(parts)-1])
 	}
 
-	var distmap []RelayDist
-
-	h1 := sha256.New() // Use sha256.New() for SHA-256
-	h1.Write([]byte(peerIP))
+	h1 := sha256.New()
+	h1.Write([]byte(peerID))
 	peerIDhash := hex.EncodeToString(h1.Sum(nil))
 
-	for _, relay := range relayList {
-
-		h_R := sha256.New() // Use sha256.New() for SHA-256
-		h_R.Write([]byte(relay))
-		RelayIDhash := hex.EncodeToString(h_R.Sum(nil))
-
-		dist := XorHexToBigInt(peerIDhash, RelayIDhash)
-
-		distmap = append(distmap, RelayDist{dist: dist, relayID: relay})
+	var distmap []RelayDist
+	for _, r := range relayList {
+		hR := sha256.New()
+		hR.Write([]byte(r))
+		relayIDhash := hex.EncodeToString(hR.Sum(nil))
+		dist := XorHexToBigInt(peerIDhash, relayIDhash)
+		distmap = append(distmap, RelayDist{dist: dist, relayID: r})
 	}
 
 	sort.Slice(distmap, func(i, j int) bool {
@@ -562,192 +621,27 @@ func GetRelayAddr(peerIP string) string {
 	})
 
 	relayIDused := distmap[0].relayID
-
-	var relayAddr string
-
-	for _, multiaddr := range RelayMultiAddrList {
-		parts := strings.Split(multiaddr, "/")
+	for _, maddr := range RelayMultiAddrList {
+		parts := strings.Split(maddr, "/")
 		if parts[len(parts)-1] == relayIDused {
-			relayAddr = multiaddr
-			break
+			return maddr
 		}
 	}
-
-	return relayAddr
+	return ""
 }
 
 func XorHexToBigInt(hex1, hex2 string) *big.Int {
-
 	bytes1, err1 := hex.DecodeString(hex1)
 	bytes2, err2 := hex.DecodeString(hex2)
-
 	if err1 != nil || err2 != nil {
 		log.Fatalf("Error decoding hex: %v %v", err1, err2)
 	}
-
 	if len(bytes1) != len(bytes2) {
 		log.Fatalf("Hex strings must be the same length")
 	}
-
 	xorBytes := make([]byte, len(bytes1))
-	for i := 0; i < len(bytes1); i++ {
+	for i := range bytes1 {
 		xorBytes[i] = bytes1[i] ^ bytes2[i]
 	}
-
-	result := new(big.Int).SetBytes(xorBytes)
-	return result
-}
-
-func AddRelayAddrToCSV(myAddr string, path string) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(myAddr + "\n")
-	return err
-}
-
-func uploadRelayAddrToSheet(myAddr string) {
-	payload := strings.NewReader(`{"addr":"` + myAddr + `"}`)
-	resp, err := http.Post(sheetWebAppURL, "application/json", payload)
-	if err != nil {
-		fmt.Printf("[ERROR] Failed to upload relay address to sheet: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-	fmt.Println("[INFO] Uploaded relay address to sheet successfully")
-}
-
-// func fetchRelayAddrsFromSheet() []string {
-// 	resp, err := http.Get(sheetWebAppURL)
-// 	if err != nil {
-// 		fmt.Printf("[ERROR] Failed to fetch relay addresses: %v\n", err)
-// 		return nil
-// 	}
-// 	defer resp.Body.Close()
-// 	body, err := ioutil.ReadAll(resp.Body)
-// 	if err != nil {
-// 		fmt.Printf("[ERROR] Failed to read response: %v\n", err)
-// 		return nil
-// 	}
-
-// 	var addrs []string
-// 	err = json.Unmarshal(body, &addrs)
-// 	if err != nil {
-// 		fmt.Printf("[ERROR] Failed to parse address list: %v\n", err)
-// 		return nil
-// 	}
-// 	fmt.Println("[INFO] Relay address list fetched from sheet")
-// 	return addrs
-// }
-
-func deleteRelayAddrFromSheet(myAddr string) {
-	reqBody := strings.NewReader(`{"delete":"` + myAddr + `"}`)
-
-	client := &http.Client{}
-	req, err := http.NewRequest("POST", sheetWebAppURL, reqBody)
-	if err != nil {
-		fmt.Printf("[ERROR] Failed to create delete request: %v\n", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[ERROR] Failed to delete relay address from sheet: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	fmt.Println("[INFO] Deleted relay address from sheet successfully")
-}
-
-// func fetchRelayAddrsFromSheet() ([]string, error) {
-// 	csvURL := "https://raw.githubusercontent.com/cherry-aggarwal/LIBR/refs/heads/integration/docs/network.csv"
-// 	resp, err := http.Get(csvURL)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to fetch CSV: %w", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	reader := csv.NewReader(resp.Body)
-
-// 	// Skip header
-// 	if _, err := reader.Read(); err != nil {
-// 		return nil, fmt.Errorf("failed to read header: %w", err)
-// 	}
-
-// 	var relayAddrs []string
-
-// 	for {
-// 		row, err := reader.Read()
-// 		if err != nil {
-// 			if err.Error() == "EOF" {
-// 				break
-// 			}
-// 			log.Printf("skipping bad row: %v", err)
-// 			continue
-// 		}
-
-// 		if len(row) < 1 {
-// 			log.Printf("skipping row with too few columns: %v", row)
-// 			continue
-// 		}
-
-// 		relayAddrs = append(relayAddrs, row[0])
-// 	}
-
-// 	if len(relayAddrs) == 0 {
-// 		return nil, fmt.Errorf("no valid address found")
-// 	}
-
-// 	return relayAddrs, nil
-// }
-
-func fetchRelayAddrsFromSheet() ([]string, error) {
-	relayGID := "1789680527"
-	rows, err := fetchRawData(relayGID)
-	if err != nil {
-		return nil, err
-	}
-
-	var relayList []string
-	for _, row := range rows {
-		if len(row) >= 1 {
-			addr := strings.TrimSpace(row[0])
-			// Only include addresses that start with '/'
-			if strings.HasPrefix(addr, "/") {
-				relayList = append(relayList, addr)
-			}
-		}
-	}
-	return relayList, nil
-}
-
-func fetchRawData(gid string) ([][]string, error) {
-	url := fmt.Sprintf("https://docs.google.com/spreadsheets/d/e/2PACX-1vRDDE0x6LttdW13zLUwodMcVBsqk8fpnUsv-5SIJifZKWRehFpSKuJZawhswGMHSI2fZJDuENQ8SX1v/pub?output=csv&gid=%s", gid)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	reader := csv.NewReader(resp.Body)
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("invalid CSV: %w", err)
-	}
-
-	if len(records) <= 1 {
-		return nil, fmt.Errorf("no data rows in sheet")
-	}
-
-	return records[1:], nil // :point_left: skip the header row
+	return new(big.Int).SetBytes(xorBytes)
 }
