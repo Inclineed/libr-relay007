@@ -1,5 +1,40 @@
 package main
 
+// =============================================================================
+// TEMPORARY CHANGES — remove these if reverting idle-shutdown fixes
+// =============================================================================
+//
+// 1. Connection manager grace period (main() ~line 263)
+//    CHANGED: connmgr.NewConnManager(100, 400, connmgr.WithGracePeriod(10*time.Minute))
+//    REVERT TO: connmgr.NewConnManager(100, 400)
+//
+// 2. Ping enabled (main(), libp2p.New() options block ~line 286)
+//    ADDED: libp2p.Ping(true),
+//    REVERT: remove that line
+//
+// 3. Keepalive goroutine (main(), after RelayHost.SetStreamHandler ~line 355)
+//    CHANGED: replaced simple sleep loop with a ticker-based goroutine that
+//             logs IDmap every 30s AND re-registers with the server every 4min.
+//    REVERT TO:
+//      go func() {
+//          for {
+//              mu.RLock()
+//              fmt.Println("[DEBUG] IDmap:", IDmap)
+//              mu.RUnlock()
+//              time.Sleep(30 * time.Second)
+//          }
+//      }()
+//
+// 4. SendMsg response buffer (handleChatStream(), SendMsg local-peer branch)
+//    CHANGED: buf := make([]byte, 1024*64)
+//    REVERT TO: buf := make([]byte, 1024)
+//
+// 5. forward response buffer (handleChatStream(), forward branch)
+//    CHANGED: buf := make([]byte, 1024*64)
+//    REVERT TO: buf := make([]byte, 1024)
+//
+// =============================================================================
+
 import (
 	"bufio"
 	"bytes"
@@ -259,7 +294,7 @@ func main() {
 
 	// Create connection manager
 	fmt.Println("[DEBUG] Creating connection manager...")
-	connMgr, err := connmgr.NewConnManager(100, 400)
+	connMgr, err := connmgr.NewConnManager(100, 400, connmgr.WithGracePeriod(10*time.Minute))
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to create connection manager: %v", err)
 	}
@@ -291,6 +326,7 @@ func main() {
 		libp2p.EnableRelayService(),
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.Transport(websocket.New),
+		libp2p.Ping(true),
 	)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to create relay host: %v", err)
@@ -344,12 +380,29 @@ func main() {
 	}()
 
 	RelayHost.SetStreamHandler("/chat/1.0.0", handleChatStream)
+
+	// Keepalive: periodically log IDmap, ping connected peers, and re-register with the server.
 	go func() {
+		registerTicker := time.NewTicker(4 * time.Minute)
+		logTicker := time.NewTicker(30 * time.Second)
+		defer registerTicker.Stop()
+		defer logTicker.Stop()
 		for {
-			mu.RLock()
-			fmt.Println("[DEBUG] IDmap:", IDmap)
-			mu.RUnlock()
-			time.Sleep(30 * time.Second)
+			select {
+			case <-logTicker.C:
+				mu.RLock()
+				fmt.Println("[DEBUG] IDmap:", IDmap)
+				mu.RUnlock()
+			case <-registerTicker.C:
+				// Re-register to keep the relay visible in the server registry.
+				go func() {
+					if err := registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey); err != nil {
+						log.Printf("[WARN] Keepalive re-registration failed: %v", err)
+					} else {
+						log.Println("[INFO] Keepalive re-registration OK")
+					}
+				}()
+			}
 		}
 	}()
 
@@ -604,7 +657,7 @@ func handleChatStream(s network.Stream) {
 			}
 			//s.Write([]byte("Success\n"))
 
-			buf := make([]byte, 1024)
+			buf := make([]byte, 1024*64)
 			RespReader := bufio.NewReader(sendStream)
 			RespReader.Read(buf)
 			buf = bytes.TrimRight(buf, "\x00")
