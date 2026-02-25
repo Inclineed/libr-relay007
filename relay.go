@@ -127,7 +127,8 @@ func (re *RelayEvents) Disconnected(net network.Network, conn network.Conn) {
 
 // serverURL is read from the SERVER_URL environment variable.
 // Set it to the base URL of your deployed librserver, e.g.:
-//   https://libr-relay007-1.onrender.com
+//
+//	https://libr-relay007-1.onrender.com
 var serverURL string
 
 const relayKeyFile = "relay_priv_key.bin"
