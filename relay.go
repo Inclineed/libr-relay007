@@ -329,11 +329,18 @@ func main() {
 		log.Fatal("[ERROR] RELAY_DOMAIN environment variable is not set")
 	}
 
+	// Render routes external port 443 to the internal PORT (default 10000).
+	// libp2p WS MUST listen on PORT so that external clients reach it.
+	wsPort := os.Getenv("PORT")
+	if wsPort == "" {
+		wsPort = "10000"
+	}
+
 	fmt.Println("[DEBUG] Creating relay host...")
 
 	RelayHost, err = libp2p.New(
 		libp2p.Identity(libp2pPrivKey),
-		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/443/ws"),
+		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/"+wsPort+"/ws"),
 		libp2p.Security(libp2ptls.ID, libp2ptls.New),
 		libp2p.ConnectionManager(connMgr),
 		libp2p.EnableNATService(),
@@ -426,13 +433,10 @@ func main() {
 		}
 	}()
 
-	// Serve a minimal HTTP health endpoint so Render's health checker gets 200 OK.
-	// Render injects a PORT env var and routes HTTP health probes there.
-	// The libp2p WS transport owns port 443 and must NOT receive plain HTTP.
-	healthPort := os.Getenv("PORT")
-	if healthPort == "" {
-		healthPort = os.Getenv("HEALTH_PORT")
-	}
+	// Serve a minimal HTTP health endpoint on a fixed port.
+	// libp2p WS owns PORT (Render's routed port). Health runs separately on 8080.
+	// In Render's dashboard set the health check to use port 8080 (or TCP check).
+	healthPort := os.Getenv("HEALTH_PORT")
 	if healthPort == "" {
 		healthPort = "8080"
 	}
