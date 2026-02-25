@@ -193,7 +193,11 @@ func getChallenge(pubKeyB64 string) (string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("getChallenge: server returned %d: %s", resp.StatusCode, body)
+		snippet := body
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return "", fmt.Errorf("getChallenge: server returned %d: %s", resp.StatusCode, snippet)
 	}
 	var result struct {
 		Nonce string `json:"nonce"`
@@ -231,6 +235,9 @@ func signedPost(endpoint string, pubKeyB64 string, priv ed25519.PrivateKey, extr
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
+		if len(b) > 200 {
+			b = b[:200]
+		}
 		return fmt.Errorf("signedPost %s: server returned %d: %s", endpoint, resp.StatusCode, b)
 	}
 	return nil
@@ -481,6 +488,11 @@ func handleChatStream(s network.Stream) {
 			if targetPeerID == "" {
 				fmt.Println("[DEBUG]This peer is not on this relay, contacting other relay")
 				targetRelayAddr := GetRelayAddr(req.PeerID)
+				if targetRelayAddr == "" {
+					fmt.Println("[DEBUG] No relay found for peer, dropping request")
+					s.Write([]byte("peer not found"))
+					return
+				}
 
 				var forwardReq reqFormat
 				forwardReq.Body = req.Body
@@ -739,6 +751,11 @@ func GetRelayAddr(peerID string) string {
 	sort.Slice(distmap, func(i, j int) bool {
 		return distmap[i].dist.Cmp(distmap[j].dist) < 0
 	})
+
+	if len(distmap) == 0 {
+		fmt.Println("[DEBUG] GetRelayAddr: no relay candidates available")
+		return ""
+	}
 
 	relayIDused := distmap[0].relayID
 	for _, maddr := range RelayMultiAddrList {
