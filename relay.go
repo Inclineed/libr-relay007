@@ -323,6 +323,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to load/generate libp2p key: %v", err)
 	}
+
+	relayDomain := os.Getenv("RELAY_DOMAIN")
+	if relayDomain == "" {
+		log.Fatal("[ERROR] RELAY_DOMAIN environment variable is not set")
+	}
+
 	fmt.Println("[DEBUG] Creating relay host...")
 
 	RelayHost, err = libp2p.New(
@@ -335,15 +341,21 @@ func main() {
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.Transport(websocket.New),
 		libp2p.Ping(true),
+		// Render terminates TLS at the edge; advertise the public wss address
+		// so peers can discover and dial us correctly.
+		libp2p.AddrsFactory(func(_ []ma.Multiaddr) []ma.Multiaddr {
+			ext, err := ma.NewMultiaddr(fmt.Sprintf("/dns4/%s/tcp/443/wss", relayDomain))
+			if err != nil {
+				log.Printf("[WARN] Failed to build external multiaddr: %v", err)
+				return nil
+			}
+			return []ma.Multiaddr{ext}
+		}),
 	)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to create relay host: %v", err)
 	}
 	RelayHost.Network().Notify(&RelayEvents{})
-	relayDomain := os.Getenv("RELAY_DOMAIN")
-	if relayDomain == "" {
-		log.Fatal("[ERROR] RELAY_DOMAIN environment variable is not set")
-	}
 	relayMultiaddrFull := fmt.Sprintf("/dns4/%s/tcp/443/wss/p2p/%s", relayDomain, RelayHost.ID().String())
 
 	defer func() {
