@@ -406,6 +406,28 @@ func main() {
 		}
 	}()
 
+	// Serve a minimal HTTP health endpoint so Render's health checker gets 200 OK.
+	// The libp2p WS transport owns port 443, so we open a separate port for this.
+	healthPort := os.Getenv("HEALTH_PORT")
+	if healthPort == "" {
+		healthPort = "8080"
+	}
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "ok")
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "ok")
+		})
+		if err := http.ListenAndServe(":"+healthPort, mux); err != nil {
+			log.Printf("[WARN] Health server error: %v", err)
+		}
+	}()
+	log.Printf("[INFO] Health check server listening on :%s", healthPort)
+
 	fmt.Println("[DEBUG] Waiting for interrupt signal...")
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
