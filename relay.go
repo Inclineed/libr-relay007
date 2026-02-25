@@ -306,7 +306,11 @@ func main() {
 		log.Fatalf("[ERROR] Failed to create relay host: %v", err)
 	}
 	RelayHost.Network().Notify(&RelayEvents{})
-	relayMultiaddrFull := fmt.Sprintf("/dns4/libr-relay.onrender.com/tcp/443/wss/p2p/%s", RelayHost.ID().String())
+	relayDomain := os.Getenv("RELAY_DOMAIN")
+	if relayDomain == "" {
+		log.Fatal("[ERROR] RELAY_DOMAIN environment variable is not set")
+	}
+	relayMultiaddrFull := fmt.Sprintf("/dns4/%s/tcp/443/wss/p2p/%s", relayDomain, RelayHost.ID().String())
 
 	defer func() {
 		fmt.Println("[DEBUG] Shutting down relay...")
