@@ -67,10 +67,6 @@ function upsertRelay(address, publicKey) {
   );
 }
 
-function touchRelay(publicKey) {
-  return db.collection('relays').updateOne({ publicKey }, { $set: { lastSeen: new Date() } });
-}
-
 function removeRelay(publicKey) {
   return db.collection('relays').deleteOne({ publicKey });
 }
@@ -118,7 +114,6 @@ module.exports = {
   removeStaleModsBefore,
   getRelays,
   upsertRelay,
-  touchRelay,
   removeRelay,
   removeStaleRelaysBefore,
   getNodes,

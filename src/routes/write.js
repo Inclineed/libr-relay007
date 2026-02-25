@@ -131,26 +131,6 @@ router.post('/relays/register', verifyEd25519, async (req, res) => {
 });
 
 /**
- * POST /relays/refresh
- * Body: { publicKey, nonce, signature }
- * Updates lastSeen for an existing relay entry.
- */
-router.post('/relays/refresh', verifyEd25519, async (req, res) => {
-  const publicKey = req.verifiedPublicKey;
-  try {
-    const result = await db.touchRelay(publicKey);
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'Relay entry not found — register first' });
-    }
-    logger.debug({ publicKey }, 'Relay presence refreshed');
-    res.json({ ok: true });
-  } catch (err) {
-    logger.error({ err }, 'POST /relays/refresh error');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-/**
  * POST /relays/deregister
  * Body: { publicKey, nonce, signature }
  * Removes the relay entry immediately (best-effort; entries expire on TTL anyway).
