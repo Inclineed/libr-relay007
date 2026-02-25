@@ -408,8 +408,12 @@ func main() {
 	}()
 
 	// Serve a minimal HTTP health endpoint so Render's health checker gets 200 OK.
-	// The libp2p WS transport owns port 443, so we open a separate port for this.
-	healthPort := os.Getenv("HEALTH_PORT")
+	// Render injects a PORT env var and routes HTTP health probes there.
+	// The libp2p WS transport owns port 443 and must NOT receive plain HTTP.
+	healthPort := os.Getenv("PORT")
+	if healthPort == "" {
+		healthPort = os.Getenv("HEALTH_PORT")
+	}
 	if healthPort == "" {
 		healthPort = "8080"
 	}
