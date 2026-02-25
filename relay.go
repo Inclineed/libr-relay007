@@ -210,16 +210,6 @@ func registerRelayWithServer(multiaddr string, pubKeyB64 string, priv ed25519.Pr
 	return nil
 }
 
-// refreshRelayWithServer refreshes this relay's lastSeen to prevent expiry.
-func refreshRelayWithServer(pubKeyB64 string, priv ed25519.PrivateKey) error {
-	if err := signedPost("/relays/refresh", pubKeyB64, priv, nil); err != nil {
-		log.Printf("[ERROR] Failed to refresh relay with server: %v", err)
-		return err
-	}
-	log.Println("[INFO] Relay presence refreshed with librserver")
-	return nil
-}
-
 // deregisterRelayFromServer removes this relay from librserver on shutdown.
 func deregisterRelayFromServer(pubKeyB64 string, priv ed25519.PrivateKey) {
 	if err := signedPost("/relays/deregister", pubKeyB64, priv, nil); err != nil {
@@ -346,20 +336,10 @@ func main() {
 		fmt.Printf("[INFO] Relay Address: %s/p2p/%s\n", addr, RelayHost.ID())
 	}
 
-	// Register with librserver so clients can discover this relay,
-	// then keep presence alive by refreshing every 90 s (half the 180 s TTL).
+	// Register with librserver so clients can discover this relay.
 	go func() {
 		if err := registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey); err != nil {
-			log.Printf("[WARN] Initial registration failed, will retry on first refresh tick")
-		}
-		ticker := time.NewTicker(90 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			// If refresh 404s (entry was swept), re-register instead.
-			if err := refreshRelayWithServer(pubKeyB64, relayPrivKey); err != nil {
-				log.Printf("[WARN] Refresh failed, attempting re-register...")
-				_ = registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey)
-			}
+			log.Printf("[WARN] Initial registration failed: %v", err)
 		}
 	}()
 
@@ -542,9 +522,8 @@ func handleChatStream(s network.Stream) {
 					fmt.Println("[DEBUG]Error sending messgae despite stream opened")
 					return
 				}
-				s.Write([]byte("Success\n"))
 
-				buf := make([]byte, 1024)
+				buf := make([]byte, 1024*64)
 				RespReader := bufio.NewReader(sendStream)
 				RespReader.Read(buf)
 				buf = bytes.TrimRight(buf, "\x00")
