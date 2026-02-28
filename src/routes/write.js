@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const db = require('../db/mongo');
+const analytics = require('../db/analytics');
 const { issueNonce } = require('../utils/nonce');
 const verifyEd25519 = require('../middleware/verifyEd25519');
 const logger = require('../logger');
@@ -46,6 +47,8 @@ router.post('/mods/register', verifyEd25519, async (req, res) => {
       return res.status(403).json({ error: 'Public key is not in the moderator allowlist' });
     }
     await db.upsertMod(peerId, publicKey);
+    analytics.trackUser(publicKey, 'mod');
+    analytics.logRegistrationEvent({ publicKey, entityType: 'mod', action: 'register', meta: { peerId } });
     logger.info({ publicKey, peerId }, 'Mod registered');
     res.json({ ok: true });
   } catch (err) {
@@ -71,6 +74,7 @@ router.post('/mods/refresh', verifyEd25519, async (req, res) => {
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Mod entry not found — register first' });
     }
+    analytics.touchUser(publicKey);
     logger.debug({ publicKey }, 'Mod presence refreshed');
     res.json({ ok: true });
   } catch (err) {
@@ -93,6 +97,8 @@ router.post('/mods/deregister', verifyEd25519, async (req, res) => {
       return res.status(403).json({ error: 'Public key is not in the moderator allowlist' });
     }
     await db.removeMod(publicKey);
+    analytics.trackUser(publicKey, 'mod');
+    analytics.logRegistrationEvent({ publicKey, entityType: 'mod', action: 'deregister' });
     logger.info({ publicKey }, 'Mod deregistered');
     res.json({ ok: true });
   } catch (err) {
@@ -122,6 +128,8 @@ router.post('/relays/register', verifyEd25519, async (req, res) => {
 
   try {
     await db.upsertRelay(address.trim(), publicKey);
+    analytics.trackUser(publicKey, 'relay');
+    analytics.logRegistrationEvent({ publicKey, entityType: 'relay', action: 'register', meta: { address } });
     logger.info({ publicKey, address }, 'Relay registered');
     res.json({ ok: true });
   } catch (err) {
@@ -149,6 +157,8 @@ router.post('/nodes/register', verifyEd25519, async (req, res) => {
 
   try {
     await db.upsertNode(nodeId, peerId, publicKey);
+    analytics.trackUser(publicKey, 'node');
+    analytics.logRegistrationEvent({ publicKey, entityType: 'node', action: 'register', meta: { nodeId, peerId } });
     logger.info({ publicKey, peerId, nodeId }, 'Node registered');
     res.json({ ok: true });
   } catch (err) {
@@ -169,6 +179,7 @@ router.post('/nodes/refresh', verifyEd25519, async (req, res) => {
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Node entry not found — register first' });
     }
+    analytics.touchUser(publicKey);
     logger.debug({ publicKey }, 'Node presence refreshed');
     res.json({ ok: true });
   } catch (err) {
@@ -186,6 +197,8 @@ router.post('/nodes/deregister', verifyEd25519, async (req, res) => {
   const publicKey = req.verifiedPublicKey;
   try {
     await db.removeNode(publicKey);
+    analytics.trackUser(publicKey, 'node');
+    analytics.logRegistrationEvent({ publicKey, entityType: 'node', action: 'deregister' });
     logger.info({ publicKey }, 'Node deregistered');
     res.json({ ok: true });
   } catch (err) {

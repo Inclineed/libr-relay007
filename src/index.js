@@ -3,9 +3,12 @@ const pinoHttp = require('pino-http');
 const logger = require('./logger');
 const config = require('./config');
 const { connect } = require('./db/mongo');
+const { connectAnalytics } = require('./db/analytics');
 const readRoutes = require('./routes/read');
 const writeRoutes = require('./routes/write');
+const analyticsRoutes = require('./routes/analytics');
 const { startExpiryJob } = require('./jobs/expiry');
+const { startDailySnapshotJob } = require('./jobs/dailySnapshot');
 
 const app = express();
 
@@ -24,10 +27,15 @@ app.use('/', readRoutes);
 // Authenticated write endpoints — Ed25519 challenge-response required
 app.use('/', writeRoutes);
 
+// Analytics endpoints — read-only
+app.use('/', analyticsRoutes);
+
 // ── Startup ───────────────────────────────────────────────────────────────────
 async function main() {
   await connect();
+  await connectAnalytics();
   startExpiryJob();
+  startDailySnapshotJob();
   app.listen(config.port, '0.0.0.0', () => {
     logger.info({ port: config.port }, 'librserver started');
   });
@@ -37,3 +45,4 @@ main().catch((err) => {
   logger.fatal({ err }, 'Failed to start server');
   process.exit(1);
 });
+

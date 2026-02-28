@@ -3,12 +3,18 @@ const config = require('../config');
 const logger = require('../logger');
 
 let db;
+let client;
 
 async function connect() {
-  const client = new MongoClient(config.mongoUri);
+  client = new MongoClient(config.mongoUri);
   await client.connect();
   db = client.db('Addrs');
   logger.info('MongoDB connected');
+}
+
+/** Returns the shared MongoClient (call after connect()). */
+function getClient() {
+  return client;
 }
 
 // ── Mods allowlist (admin-managed, static) ────────────────────────────────────
@@ -100,6 +106,7 @@ function removeStaleNodesBefore(cutoff) {
 
 module.exports = {
   connect,
+  getClient,
   isModAllowed,
   getMods,
   upsertMod,
