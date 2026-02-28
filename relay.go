@@ -447,18 +447,18 @@ func handleChatStream(s network.Stream) {
 	for {
 
 		var req reqFormat
-		// ReadBytes reads until the newline delimiter that senders append, so
-		// the entire message is consumed regardless of size (handles images, etc.).
-		line, err := reader.ReadBytes('\n')
+		buf := make([]byte, 1024*1024*2) // or size based on expected message
+		n, err := reader.Read(buf)
 		if err != nil {
 			fmt.Println("[DEBUG] Error reading from connection at relay:", err)
 			return
 		}
+		buf = bytes.TrimRight(buf, "\x00")
 
-		err = json.Unmarshal(line, &req)
+		err = json.Unmarshal(buf[:n], &req)
 		if err != nil {
 			fmt.Printf("[DEBUG] Error parsing JSON at relay: %v\n", err)
-			fmt.Printf("[DEBUG] Received Data: %s\n", string(line))
+			fmt.Printf("[DEBUG] Received Data: %s\n", string(buf[:n]))
 			return
 		}
 
