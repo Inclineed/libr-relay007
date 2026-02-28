@@ -130,22 +130,6 @@ router.post('/relays/register', verifyEd25519, async (req, res) => {
   }
 });
 
-/**
- * POST /relays/deregister
- * Body: { publicKey, nonce, signature }
- * Removes the relay entry immediately (best-effort; entries expire on TTL anyway).
- */
-router.post('/relays/deregister', verifyEd25519, async (req, res) => {
-  const publicKey = req.verifiedPublicKey;
-  try {
-    await db.removeRelay(publicKey);
-    logger.info({ publicKey }, 'Relay deregistered');
-    res.json({ ok: true });
-  } catch (err) {
-    logger.error({ err }, 'POST /relays/deregister error');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 // ── Nodes ─────────────────────────────────────────────────────────────────────
 

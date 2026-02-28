@@ -3,24 +3,25 @@ const config = require('../config');
 const logger = require('../logger');
 
 /**
- * Periodically removes mod and relay entries that have not been refreshed
+ * Periodically removes mod and node entries that have not been refreshed
  * within the configured TTL. This makes the registry self-healing — offline
  * nodes disappear automatically without requiring an explicit deregister call.
  *
+ * Relay entries are permanent and are NOT expired by this job.
+ *
  * Runs every EXPIRY_JOB_INTERVAL_SECONDS (default 90 s).
- * GET /mods and GET /relays also filter by lastSeen as a second line of defence.
+ * GET /mods and GET /nodes also filter by lastSeen as a second line of defence.
  */
 function startExpiryJob() {
   const interval = setInterval(async () => {
     const cutoff = new Date(Date.now() - config.entryTtlMs);
     try {
       const modResult = await db.removeStaleModsBefore(cutoff);
-      const relayResult = await db.removeStaleRelaysBefore(cutoff);
       const nodeResult = await db.removeStaleNodesBefore(cutoff);
-      const removed = modResult.deletedCount + relayResult.deletedCount + nodeResult.deletedCount;
+      const removed = modResult.deletedCount + nodeResult.deletedCount;
       if (removed > 0) {
         logger.info(
-          { staleMods: modResult.deletedCount, staleRelays: relayResult.deletedCount, staleNodes: nodeResult.deletedCount, cutoff },
+          { staleMods: modResult.deletedCount, staleNodes: nodeResult.deletedCount, cutoff },
           'Expiry job removed stale entries',
         );
       }

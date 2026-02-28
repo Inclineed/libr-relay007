@@ -52,11 +52,10 @@ function removeStaleModsBefore(cutoff) {
   return db.collection('onlinemods').deleteMany({ lastSeen: { $lt: cutoff } });
 }
 
-// ── Relays ────────────────────────────────────────────────────────────────────
+// ── Relays (permanent entries — no TTL expiry) ────────────────────────────────
 
-function getRelays(sinceMs) {
-  const filter = sinceMs ? { lastSeen: { $gte: new Date(Date.now() - sinceMs) } } : {};
-  return db.collection('relays').find(filter, { projection: { _id: 0 } }).toArray();
+function getRelays() {
+  return db.collection('relays').find({}, { projection: { _id: 0 } }).toArray();
 }
 
 function upsertRelay(address, publicKey) {
@@ -67,13 +66,8 @@ function upsertRelay(address, publicKey) {
   );
 }
 
-function removeRelay(publicKey) {
-  return db.collection('relays').deleteOne({ publicKey });
-}
 
-function removeStaleRelaysBefore(cutoff) {
-  return db.collection('relays').deleteMany({ lastSeen: { $lt: cutoff } });
-}
+
 
 // ── Nodes (bootstrap DB nodes — dynamic, TTL-based, same as relays) ─────────
 // Collection: 'nodes' — { nodeId, peerId, publicKey, lastSeen }
@@ -114,8 +108,6 @@ module.exports = {
   removeStaleModsBefore,
   getRelays,
   upsertRelay,
-  removeRelay,
-  removeStaleRelaysBefore,
   getNodes,
   upsertNode,
   touchNode,

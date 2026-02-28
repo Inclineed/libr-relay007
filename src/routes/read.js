@@ -48,7 +48,7 @@ router.get('/mods/check', async (req, res) => {
  */
 router.get('/relays', async (_req, res) => {
   try {
-    const relays = await db.getRelays(config.entryTtlMs);
+    const relays = await db.getRelays();
     res.json(relays);
   } catch (err) {
     logger.error({ err }, 'GET /relays error');
