@@ -253,15 +253,6 @@ func registerRelayWithServer(multiaddr string, pubKeyB64 string, priv ed25519.Pr
 	return nil
 }
 
-// deregisterRelayFromServer removes this relay from librserver on shutdown.
-func deregisterRelayFromServer(pubKeyB64 string, priv ed25519.PrivateKey) {
-	if err := signedPost("/relays/deregister", pubKeyB64, priv, nil); err != nil {
-		log.Printf("[WARN] Failed to deregister relay: %v", err)
-	} else {
-		log.Println("[INFO] Relay deregistered from librserver")
-	}
-}
-
 // fetchRelaysFromServer retrieves live relay multiaddrs from librserver.
 func fetchRelaysFromServer() ([]string, error) {
 	resp, err := http.Get(serverURL + "/relays")
@@ -367,7 +358,6 @@ func main() {
 
 	defer func() {
 		fmt.Println("[DEBUG] Shutting down relay...")
-		deregisterRelayFromServer(pubKeyB64, relayPrivKey)
 		RelayHost.Close()
 	}()
 	customRelayResources := relay.Resources{
@@ -408,28 +398,14 @@ func main() {
 
 	RelayHost.SetStreamHandler("/chat/1.0.0", handleChatStream)
 
-	// Keepalive: periodically log IDmap, ping connected peers, and re-register with the server.
+	// Keepalive: periodically log IDmap.
 	go func() {
-		registerTicker := time.NewTicker(4 * time.Minute)
 		logTicker := time.NewTicker(30 * time.Second)
-		defer registerTicker.Stop()
 		defer logTicker.Stop()
-		for {
-			select {
-			case <-logTicker.C:
-				mu.RLock()
-				fmt.Println("[DEBUG] IDmap:", IDmap)
-				mu.RUnlock()
-			case <-registerTicker.C:
-				// Re-register to keep the relay visible in the server registry.
-				go func() {
-					if err := registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey); err != nil {
-						log.Printf("[WARN] Keepalive re-registration failed: %v", err)
-					} else {
-						log.Println("[INFO] Keepalive re-registration OK")
-					}
-				}()
-			}
+		for range logTicker.C {
+			mu.RLock()
+			fmt.Println("[DEBUG] IDmap:", IDmap)
+			mu.RUnlock()
 		}
 	}()
 
