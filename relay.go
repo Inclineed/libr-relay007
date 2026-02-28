@@ -443,24 +443,25 @@ func main() {
 func handleChatStream(s network.Stream) {
 	fmt.Println("[DEBUG] Incoming chat stream from", s.Conn().RemoteMultiaddr())
 	defer s.Close()
-	reader := bufio.NewReader(s)
-	for {
 
-		var req reqFormat
-		buf := make([]byte, 1024*1024*2) // or size based on expected message
-		n, err := reader.Read(buf)
-		if err != nil {
-			fmt.Println("[DEBUG] Error reading from connection at relay:", err)
-			return
-		}
-		buf = bytes.TrimRight(buf, "\x00")
+	// Use io.ReadAll — clients call CloseWrite() after sending, so this
+	// terminates cleanly and captures the full payload (including large images).
+	rawBuf, err := io.ReadAll(s)
+	if err != nil {
+		fmt.Println("[DEBUG] Error reading from connection at relay:", err)
+		return
+	}
+	rawBuf = bytes.TrimRight(rawBuf, "\x00")
 
-		err = json.Unmarshal(buf[:n], &req)
-		if err != nil {
-			fmt.Printf("[DEBUG] Error parsing JSON at relay: %v\n", err)
-			fmt.Printf("[DEBUG] Received Data: %s\n", string(buf[:n]))
-			return
-		}
+	var req reqFormat
+	if err = json.Unmarshal(rawBuf, &req); err != nil {
+		fmt.Printf("[DEBUG] Error parsing JSON at relay: %v\n", err)
+		fmt.Printf("[DEBUG] Received Data (first 200 bytes): %s\n", string(rawBuf[:min(200, len(rawBuf))]))
+		return
+	}
+
+	// Single-request-per-stream: process once and return
+	{
 
 		fmt.Printf("req by user is : %+v \n", req)
 
