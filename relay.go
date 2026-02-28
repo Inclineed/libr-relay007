@@ -530,7 +530,7 @@ func handleChatStream(s network.Stream) {
 				}
 
 				buf := make([]byte, 1024*1024*2) // 10 MB — large enough for image responses
-				respReader := bufio.NewReaderSize(forwardStream, 1024*1024*10)
+				respReader := bufio.NewReaderSize(forwardStream, 1024*1024*2)
 				_, err = respReader.Read(buf)
 				buf = bytes.TrimRight(buf, "\x00")
 				var resp respFormat
@@ -607,21 +607,23 @@ func handleChatStream(s network.Stream) {
 					return
 				}
 
-				buf := make([]byte, 1024*64)
-				RespReader := bufio.NewReader(sendStream)
-				RespReader.Read(buf)
+				// Use io.ReadAll so large payloads (e.g. base64 images) are read fully
+				buf, err := io.ReadAll(sendStream)
+				if err != nil && err != io.EOF {
+					fmt.Println("[DEBUG] Error reading response from mod:", err)
+					return
+				}
 				buf = bytes.TrimRight(buf, "\x00")
 				var resp respFormat
 				resp.Type = "GET"
 				resp.Resp = buf
-				fmt.Printf("[Debug]Resp from %s : %+v \n", targetID.String(), resp)
+				fmt.Printf("[Debug]Resp from %s (len=%d)\n", targetID.String(), len(buf))
 
 				jsonResp, err := json.Marshal(resp)
 				if err != nil {
 					fmt.Println("[DEBUG]Error marshalling the response at relay")
 				}
-				_ = jsonResp // if required whole jsonResp can be sent but it makes unmarhsalling the response harder for the client
-				fmt.Println("[DEBUG]Raw Resp :", string(resp.Resp))
+				_ = jsonResp
 				_, err = s.Write(resp.Resp)
 				if err != nil {
 					fmt.Println("[DEBUG]Error sending response back")
@@ -688,21 +690,23 @@ func handleChatStream(s network.Stream) {
 			}
 			//s.Write([]byte("Success\n"))
 
-			buf := make([]byte, 1024*64)
-			RespReader := bufio.NewReader(sendStream)
-			RespReader.Read(buf)
+			// Use io.ReadAll so large payloads (e.g. base64 images) are read fully
+			buf, err := io.ReadAll(sendStream)
+			if err != nil && err != io.EOF {
+				fmt.Println("[DEBUG] Error reading forwarded response:", err)
+				return
+			}
 			buf = bytes.TrimRight(buf, "\x00")
 			var resp respFormat
 			resp.Type = "GET"
 			resp.Resp = buf
-			fmt.Printf("[Debug]Resp from %s : %+v \n", targetID.String(), resp)
+			fmt.Printf("[Debug]Resp from %s (len=%d)\n", targetID.String(), len(buf))
 
 			jsonResp, err := json.Marshal(resp)
 			if err != nil {
 				fmt.Println("[DEBUG]Error marshalling the response at relay")
 			}
-			_ = jsonResp // if required whole jsonResp can be sent but it makes unmarhsalling the response harder for the client
-			fmt.Println("[DEBUG]Raw Resp :", string(resp.Resp))
+			_ = jsonResp
 			_, err = s.Write(resp.Resp)
 			if err != nil {
 				fmt.Println("[DEBUG]Error sending response back")
