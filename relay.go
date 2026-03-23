@@ -503,7 +503,7 @@ func handleChatStream(s network.Stream) {
 				targetRelayAddr := GetRelayAddr(req.PeerID)
 				if targetRelayAddr == "" {
 					fmt.Println("[DEBUG] No relay found for peer, dropping request")
-					s.Write([]byte("peer not found"))
+					s.Write([]byte(`{"error":"peer not found"}`))
 					return
 				}
 
@@ -524,6 +524,11 @@ func handleChatStream(s network.Stream) {
 					fmt.Println("[DEBUG] Failed to parse target relay info:", err)
 					return
 				}
+				if TargetRelayInfo.ID == RelayHost.ID() {
+					fmt.Println("[DEBUG] Target relay matches self but peer is offline.")
+					s.Write([]byte(`{"error":"peer offline"}`))
+					return
+				}
 
 				err = RelayHost.Connect(context.Background(), *TargetRelayInfo)
 				if err != nil {
@@ -536,36 +541,36 @@ func handleChatStream(s network.Stream) {
 					fmt.Println("[DEBUG] Failed to open stream to target relay:", err)
 					return
 				}
-				defer forwardStream.Close()
 
 				jsonForwardReq, err := json.Marshal(forwardReq)
 				if err != nil {
 					fmt.Println("[DEBUG] Failed to marshal forward request:", err)
+					forwardStream.Close()
 					return
 				}
 
 				_, err = forwardStream.Write(append(jsonForwardReq, '\n'))
 				if err != nil {
 					fmt.Println("[DEBUG] Failed to write forward request to stream:", err)
+					forwardStream.Close()
 					return
 				}
 
-				buf := make([]byte, 1024*64)
-				respReader := bufio.NewReader(forwardStream)
-				_, err = respReader.Read(buf)
-				buf = bytes.TrimRight(buf, "\x00")
+				respBody, err := io.ReadAll(forwardStream)
+				if err != nil && err != io.EOF {
+					fmt.Println("[DEBUG] Error reading response from target relay:", err)
+					forwardStream.Close()
+					return
+				}
+
 				var resp respFormat
 				resp.Type = "GET"
-				resp.Resp = buf
-				fmt.Printf("[Debug]Frowarded Resp from relay : %s : %+v \n", TargetRelayInfo.ID.String(), resp)
-
-				if err != nil {
-					fmt.Println("[DEBUG] Error reading response from target relay:", err)
-					return
-				}
+				resp.Resp = respBody
+				fmt.Printf("[Debug]Forwarded Resp from relay : %s : %+v \n", TargetRelayInfo.ID.String(), resp)
 
 				_, err = s.Write(resp.Resp)
-				defer s.Close()
+				forwardStream.Close()
+				s.Close()
 				if err != nil {
 					fmt.Println("[DEBUG] Error sending back to original sender:", err)
 					return
@@ -583,7 +588,7 @@ func handleChatStream(s network.Stream) {
 				fmt.Println("2")
 				if err != nil {
 					log.Printf("[ERROR] Invalid Peer ID: %v", err)
-					s.Write([]byte("invalid peer id"))
+					s.Write([]byte(`{"error":"invalid peer id"}`))
 					return
 				}
 
@@ -598,7 +603,7 @@ func handleChatStream(s network.Stream) {
 				addrInfo, err := peer.AddrInfoFromP2pAddr(fullAddr)
 				if err != nil {
 					log.Printf("Invalid relayed multiaddr: %s", fullAddr)
-					s.Write([]byte("bad relayed addr"))
+					s.Write([]byte(`{"error":"bad relayed addr"}`))
 					return
 				}
 
@@ -614,7 +619,7 @@ func handleChatStream(s network.Stream) {
 				if err != nil {
 					fmt.Println("[DEBUG]Error opening stream to target peer")
 					fmt.Println(err)
-					s.Write([]byte("failed"))
+					s.Write([]byte(`{"error":"failed to connect to peer"}`))
 					return
 				}
 				jsonReqServer, err := json.Marshal(req)
@@ -628,13 +633,17 @@ func handleChatStream(s network.Stream) {
 					return
 				}
 
-				buf := make([]byte, 1024*64)
-				RespReader := bufio.NewReader(sendStream)
-				RespReader.Read(buf)
-				buf = bytes.TrimRight(buf, "\x00")
+				respBody, err := io.ReadAll(sendStream)
+				if err != nil && err != io.EOF {
+					fmt.Println("[DEBUG] Error reading response from target peer:", err)
+					sendStream.Close()
+					s.Write([]byte(`{"error":"failed to read response"}`))
+					return
+				}
+
 				var resp respFormat
 				resp.Type = "GET"
-				resp.Resp = buf
+				resp.Resp = respBody
 				fmt.Printf("[Debug]Resp from %s : %+v \n", targetID.String(), resp)
 
 				jsonResp, err := json.Marshal(resp)
@@ -647,8 +656,8 @@ func handleChatStream(s network.Stream) {
 				if err != nil {
 					fmt.Println("[DEBUG]Error sending response back")
 				}
-				defer s.Close()
-				defer sendStream.Close()
+				sendStream.Close()
+				s.Close()
 			}
 		}
 
@@ -659,7 +668,7 @@ func handleChatStream(s network.Stream) {
 
 			if targetPeerID == "" {
 				fmt.Println("[DEBUG] Target peer not found in this relay")
-				s.Write([]byte("Target peer not found"))
+				s.Write([]byte(`{"error":"Target peer not found"}`))
 				return
 			}
 
@@ -693,9 +702,9 @@ func handleChatStream(s network.Stream) {
 			sendStream, err := RelayHost.NewStream(context.Background(), targetID, ChatProtocol)
 			if err != nil {
 				fmt.Println("[DEBUG] Failed to open stream to target peer")
+				s.Write([]byte(`{"error":"failed to open stream to target peer"}`))
 				return
 			}
-			defer sendStream.Close()
 
 			jsonReqServer, err := json.Marshal(req)
 			if err != nil {
@@ -705,17 +714,22 @@ func handleChatStream(s network.Stream) {
 
 			if err != nil {
 				fmt.Println("[DEBUG]Error sending messgae despite stream opened")
+				sendStream.Close()
 				return
 			}
 			//s.Write([]byte("Success\n"))
 
-			buf := make([]byte, 1024*64)
-			RespReader := bufio.NewReader(sendStream)
-			RespReader.Read(buf)
-			buf = bytes.TrimRight(buf, "\x00")
+			respBody, err := io.ReadAll(sendStream)
+			if err != nil && err != io.EOF {
+				fmt.Println("[DEBUG] Error reading response from target peer:", err)
+				sendStream.Close()
+				s.Write([]byte(`{"error":"failed to read response"}`))
+				return
+			}
+
 			var resp respFormat
 			resp.Type = "GET"
-			resp.Resp = buf
+			resp.Resp = respBody
 			fmt.Printf("[Debug]Resp from %s : %+v \n", targetID.String(), resp)
 
 			jsonResp, err := json.Marshal(resp)
@@ -728,8 +742,8 @@ func handleChatStream(s network.Stream) {
 			if err != nil {
 				fmt.Println("[DEBUG]Error sending response back")
 			}
-			defer s.Close()
-			defer sendStream.Close()
+			sendStream.Close()
+			s.Close()
 		}
 	}
 }
