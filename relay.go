@@ -253,6 +253,15 @@ func registerRelayWithServer(multiaddr string, pubKeyB64 string, priv ed25519.Pr
 	return nil
 }
 
+// deregisterRelayFromServer removes this relay from librserver on shutdown.
+func deregisterRelayFromServer(pubKeyB64 string, priv ed25519.PrivateKey) {
+	if err := signedPost("/relays/deregister", pubKeyB64, priv, nil); err != nil {
+		log.Printf("[WARN] Failed to deregister relay: %v", err)
+	} else {
+		log.Println("[INFO] Relay deregistered from librserver")
+	}
+}
+
 // fetchRelaysFromServer retrieves live relay multiaddrs from librserver.
 func fetchRelaysFromServer() ([]string, error) {
 	resp, err := http.Get(serverURL + "/relays")
@@ -358,12 +367,13 @@ func main() {
 
 	defer func() {
 		fmt.Println("[DEBUG] Shutting down relay...")
+		deregisterRelayFromServer(pubKeyB64, relayPrivKey)
 		RelayHost.Close()
 	}()
 	customRelayResources := relay.Resources{
 		Limit: &relay.RelayLimit{
 			Duration: 30 * time.Minute,
-			Data:     1 << 20, // 1MB data limit per stream
+			Data:     0, // 0 usually means no data limit
 		},
 		ReservationTTL:         time.Hour,
 		MaxReservations:        512,
@@ -398,14 +408,28 @@ func main() {
 
 	RelayHost.SetStreamHandler("/chat/1.0.0", handleChatStream)
 
-	// Keepalive: periodically log IDmap.
+	// Keepalive: periodically log IDmap, ping connected peers, and re-register with the server.
 	go func() {
+		registerTicker := time.NewTicker(4 * time.Minute)
 		logTicker := time.NewTicker(30 * time.Second)
+		defer registerTicker.Stop()
 		defer logTicker.Stop()
-		for range logTicker.C {
-			mu.RLock()
-			fmt.Println("[DEBUG] IDmap:", IDmap)
-			mu.RUnlock()
+		for {
+			select {
+			case <-logTicker.C:
+				mu.RLock()
+				fmt.Println("[DEBUG] IDmap:", IDmap)
+				mu.RUnlock()
+			case <-registerTicker.C:
+				// Re-register to keep the relay visible in the server registry.
+				go func() {
+					if err := registerRelayWithServer(relayMultiaddrFull, pubKeyB64, relayPrivKey); err != nil {
+						log.Printf("[WARN] Keepalive re-registration failed: %v", err)
+					} else {
+						log.Println("[INFO] Keepalive re-registration OK")
+					}
+				}()
+			}
 		}
 	}()
 
@@ -443,25 +467,24 @@ func main() {
 func handleChatStream(s network.Stream) {
 	fmt.Println("[DEBUG] Incoming chat stream from", s.Conn().RemoteMultiaddr())
 	defer s.Close()
+	reader := bufio.NewReader(s)
+	for {
 
-	// Use io.ReadAll — clients call CloseWrite() after sending, so this
-	// terminates cleanly and captures the full payload (including large images).
-	rawBuf, err := io.ReadAll(s)
-	if err != nil {
-		fmt.Println("[DEBUG] Error reading from connection at relay:", err)
-		return
-	}
-	rawBuf = bytes.TrimRight(rawBuf, "\x00")
+		var req reqFormat
+		buf := make([]byte, 1024*64) // or size based on expected message
+		n, err := reader.Read(buf)
+		if err != nil {
+			fmt.Println("[DEBUG] Error reading from connection at relay:", err)
+			return
+		}
+		buf = bytes.TrimRight(buf, "\x00")
 
-	var req reqFormat
-	if err = json.Unmarshal(rawBuf, &req); err != nil {
-		fmt.Printf("[DEBUG] Error parsing JSON at relay: %v\n", err)
-		fmt.Printf("[DEBUG] Received Data (first 200 bytes): %s\n", string(rawBuf[:min(200, len(rawBuf))]))
-		return
-	}
-
-	// Single-request-per-stream: process once and return
-	{
+		err = json.Unmarshal(buf[:n], &req)
+		if err != nil {
+			fmt.Printf("[DEBUG] Error parsing JSON at relay: %v\n", err)
+			fmt.Printf("[DEBUG] Received Data: %s\n", string(buf[:n]))
+			return
+		}
 
 		fmt.Printf("req by user is : %+v \n", req)
 
@@ -530,8 +553,8 @@ func handleChatStream(s network.Stream) {
 					return
 				}
 
-				buf := make([]byte, 1024*1024*2) // 10 MB — large enough for image responses
-				respReader := bufio.NewReaderSize(forwardStream, 1024*1024*2)
+				buf := make([]byte, 1024*64)
+				respReader := bufio.NewReader(forwardStream)
 				_, err = respReader.Read(buf)
 				buf = bytes.TrimRight(buf, "\x00")
 				var resp respFormat
@@ -608,23 +631,21 @@ func handleChatStream(s network.Stream) {
 					return
 				}
 
-				// Use io.ReadAll so large payloads (e.g. base64 images) are read fully
-				buf, err := io.ReadAll(sendStream)
-				if err != nil && err != io.EOF {
-					fmt.Println("[DEBUG] Error reading response from mod:", err)
-					return
-				}
+				buf := make([]byte, 1024*64)
+				RespReader := bufio.NewReader(sendStream)
+				RespReader.Read(buf)
 				buf = bytes.TrimRight(buf, "\x00")
 				var resp respFormat
 				resp.Type = "GET"
 				resp.Resp = buf
-				fmt.Printf("[Debug]Resp from %s (len=%d)\n", targetID.String(), len(buf))
+				fmt.Printf("[Debug]Resp from %s : %+v \n", targetID.String(), resp)
 
 				jsonResp, err := json.Marshal(resp)
 				if err != nil {
 					fmt.Println("[DEBUG]Error marshalling the response at relay")
 				}
-				_ = jsonResp
+				_ = jsonResp // if required whole jsonResp can be sent but it makes unmarhsalling the response harder for the client
+				fmt.Println("[DEBUG]Raw Resp :", string(resp.Resp))
 				_, err = s.Write(resp.Resp)
 				if err != nil {
 					fmt.Println("[DEBUG]Error sending response back")
@@ -691,23 +712,21 @@ func handleChatStream(s network.Stream) {
 			}
 			//s.Write([]byte("Success\n"))
 
-			// Use io.ReadAll so large payloads (e.g. base64 images) are read fully
-			buf, err := io.ReadAll(sendStream)
-			if err != nil && err != io.EOF {
-				fmt.Println("[DEBUG] Error reading forwarded response:", err)
-				return
-			}
+			buf := make([]byte, 1024*64)
+			RespReader := bufio.NewReader(sendStream)
+			RespReader.Read(buf)
 			buf = bytes.TrimRight(buf, "\x00")
 			var resp respFormat
 			resp.Type = "GET"
 			resp.Resp = buf
-			fmt.Printf("[Debug]Resp from %s (len=%d)\n", targetID.String(), len(buf))
+			fmt.Printf("[Debug]Resp from %s : %+v \n", targetID.String(), resp)
 
 			jsonResp, err := json.Marshal(resp)
 			if err != nil {
 				fmt.Println("[DEBUG]Error marshalling the response at relay")
 			}
-			_ = jsonResp
+			_ = jsonResp // if required whole jsonResp can be sent but it makes unmarhsalling the response harder for the client
+			fmt.Println("[DEBUG]Raw Resp :", string(resp.Resp))
 			_, err = s.Write(resp.Resp)
 			if err != nil {
 				fmt.Println("[DEBUG]Error sending response back")
