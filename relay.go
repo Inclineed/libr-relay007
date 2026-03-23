@@ -371,10 +371,7 @@ func main() {
 		RelayHost.Close()
 	}()
 	customRelayResources := relay.Resources{
-		Limit: &relay.RelayLimit{
-			Duration: 30 * time.Minute,
-			Data:     0, // 0 usually means no data limit
-		},
+		Limit:                  nil, // Completely disables both time and data limits for the stream
 		ReservationTTL:         time.Hour,
 		MaxReservations:        512,
 		MaxCircuits:            64,
